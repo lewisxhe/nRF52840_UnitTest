@@ -45,7 +45,7 @@ void loopGPS();
 void loopSender();
 void loopReciver();
 void sleepnRF52840();
-
+void deviceProbe(TwoWire &t);
 /***********************************
    ____  ____       _
   / __ \|  _ \     | |
@@ -59,7 +59,11 @@ SPIClass        *dispPort  = nullptr;
 SPIClass        *rfPort    = nullptr;
 GxIO_Class      *io        = nullptr;
 GxEPD_Class     *display   = nullptr;
+#if defined(VERSION_1)
 Air530          *gps       = nullptr;
+#else
+TinyGPSPlus     *gps;
+#endif
 SX1262          radio      = nullptr;       //SX1262
 PCF8563_Class   rtc;
 #ifdef USING_BMP280
@@ -111,7 +115,7 @@ typedef enum {
 ************************************/
 bool setupGPS()
 {
-    SerialMon.println("[Air530] Initializing ... ");
+    SerialMon.println("[GPS] Initializing ... ");
     SerialMon.flush();
 #ifndef PCA10056
     SerialGPS.setPins(Gps_Rx_Pin, Gps_Tx_Pin);
@@ -119,14 +123,33 @@ bool setupGPS()
     SerialGPS.begin(9600);
     SerialGPS.flush();
 
-    gps = new Air530(&SerialGPS, Gps_Wakeup_Pin);
+    pinMode(Gps_pps_Pin, INPUT);
 
+    pinMode(Gps_Wakeup_Pin, OUTPUT);
+    digitalWrite(Gps_Wakeup_Pin, HIGH);
+#if defined(VERSION_1)
+    gps = new Air530(&SerialGPS, Gps_Wakeup_Pin);
+#else
+    delay(10);
+    pinMode(Gps_Reset_Pin, OUTPUT);
+    digitalWrite(Gps_Reset_Pin, HIGH); delay(10);
+    digitalWrite(Gps_Reset_Pin, LOW); delay(10);
+    digitalWrite(Gps_Reset_Pin, HIGH);
+    gps = new TinyGPSPlus();
+#endif
     return true;
 }
 
 void loopGPS()
 {
+#if defined(VERSION_1)
     gps->process();
+#else
+    while (SerialGPS.available()) {
+        gps->encode(SerialGPS.read());
+    }
+#endif
+
 
     if (gps->location.isUpdated()) {
         SerialMon.print(F("LOCATION   Fix Age="));
@@ -280,7 +303,14 @@ void loopGPS()
         display->print(":");
         display->print(gps->time.hour());
         display->print(":");
-        display->print(gps->time.minute());
+        display->println(gps->time.minute());
+
+        display->print("[ln/la]");
+        display->setCursor(xoffset, display->getCursorY());
+        display->print(":");
+        display->print(gps->location.lng(), 2);
+        display->print("/");
+        display->println(gps->location.lat(), 2);
 
         display->updateWindow(0, 0, GxEPD_WIDTH, GxEPD_HEIGHT, false);
 
@@ -318,6 +348,8 @@ void wakeupGPS()
 bool setupSensor()
 {
     SerialMon.print("[SENSOR ] Initializing ...  ");
+    // Serial.println("Return!");
+    // return false;
 #ifdef USING_BMP280
     if (bmp.begin()) {
         SerialMon.println("success");
@@ -495,12 +527,27 @@ bool setupRTC()
 {
     SerialMon.print("[PCF8563] Initializing ...  ");
     Wire.begin();
-    Wire.beginTransmission(PCF8563_SLAVE_ADDRESS);
-    if (Wire.endTransmission() != 0) {
+
+    int i = 3;
+
+    // deviceProbe(Wire);
+
+    int ret = 0;
+    do {
+
+        //HYM8563 bug!!
+        Wire.beginTransmission(PCF8563_SLAVE_ADDRESS);
+        ret = Wire.endTransmission();
+        delay(200);
+
+    } while (i--);
+
+    if (ret != 0) {
         SerialMon.println("failed");
         return false;
     }
     SerialMon.println("success");
+
     rtc.begin(Wire);
     return true;
 }
@@ -920,10 +967,31 @@ void setupBLE()
  |_|  |_|  \__,_| |_| |_| |_|
 
 ************************************/
+void configVDD(void)
+{
+    // Configure UICR_REGOUT0 register only if it is set to default value.
+    if ((NRF_UICR->REGOUT0 & UICR_REGOUT0_VOUT_Msk) ==
+            (UICR_REGOUT0_VOUT_DEFAULT << UICR_REGOUT0_VOUT_Pos)) {
+        NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
+        while (NRF_NVMC->READY == NVMC_READY_READY_Busy) {}
 
+        NRF_UICR->REGOUT0 = (NRF_UICR->REGOUT0 & ~((uint32_t)UICR_REGOUT0_VOUT_Msk)) |
+                            (UICR_REGOUT0_VOUT_3V3 << UICR_REGOUT0_VOUT_Pos);
+
+        NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
+        while (NRF_NVMC->READY == NVMC_READY_READY_Busy) {}
+
+        // System reset is needed to update UICR registers.
+        NVIC_SystemReset();
+    }
+}
 void boardInit()
 {
     uint8_t rlst = 0;
+
+#ifdef HIGH_VOLTAGE
+    configVDD();
+#endif
 
     SerialMon.begin(MONITOR_SPEED);
     // delay(5000);
@@ -941,6 +1009,11 @@ void boardInit()
     pinMode(Power_Enable_Pin, OUTPUT);
     digitalWrite(Power_Enable_Pin, HIGH);
 
+#if defined(Power_Enable1_Pin)
+    pinMode(Power_Enable1_Pin, OUTPUT);
+    digitalWrite(Power_Enable1_Pin, HIGH);
+#endif
+
     pinMode(ePaper_Backlight, OUTPUT);
     digitalWrite(ePaper_Backlight, HIGH);
 
@@ -950,12 +1023,12 @@ void boardInit()
 
     pinMode(Touch_Pin, INPUT_PULLDOWN_SENSE);
 
-    int i = 5;
+    int i = 10;
     while (i--) {
         digitalWrite(GreenLed_Pin, !digitalRead(GreenLed_Pin));
         digitalWrite(RedLed_Pin, !digitalRead(RedLed_Pin));
         digitalWrite(BlueLed_Pin, !digitalRead(BlueLed_Pin));
-        delay(500);
+        delay(300);
     }
     digitalWrite(GreenLed_Pin, HIGH);
     digitalWrite(RedLed_Pin, HIGH);
@@ -981,7 +1054,7 @@ void boardInit()
     display->drawFastHLine(0, display->getCursorY() - 5, display->width(), GxEPD_BLACK);
     display->println();
     display->setFont(&FreeMonoBold12pt7b);
-    display->print("[Air530] ");
+    display->print("[  GPS ] ");
     display->println(rlst & bit(1) ? "PASS" : "FAIL");
     display->print("[SX1262] ");
     display->println(rlst & bit(2) ? "PASS" : "FAIL");
@@ -992,10 +1065,16 @@ void boardInit()
     display->print("[SENSOR ]");
     display->println(rlst & bit(5) ? "PASS" : "FAIL");
 
-    display->print("[GPS VER]");
-    display->println(gps->getSoftVersion());
+    /*
+        // display->print("[GPS VER]");
+        // display->println(gps->getSoftVersion());
+        */
 
     display->update();
+
+    delay(500);
+
+// sleepnRF52840();
 }
 
 void wakeupPeripherals()
@@ -1012,11 +1091,37 @@ void wakeupPeripherals()
 
 void sleepPeripherals()
 {
-    sleepGPS();
+    // sleepGPS();
     sleepFlash();
     sleepLoRa();
     sleepSensor();
     enableBacklight(false);
+    Wire.end();
+    pinMode(SDA_Pin, INPUT);
+    pinMode(SCL_Pin, INPUT);
+
+    rfPort->end();
+    pinMode(LoRa_Miso, INPUT);
+    pinMode(LoRa_Mosi, INPUT);
+    pinMode(LoRa_Sclk, INPUT);
+    pinMode(LoRa_Cs, INPUT);
+    pinMode(LoRa_Rst, INPUT);
+
+    // dispPort->end();
+    pinMode(ePaper_Miso, INPUT);
+    pinMode(ePaper_Mosi, INPUT);
+    pinMode(ePaper_Sclk, INPUT);
+    pinMode(ePaper_Cs, INPUT);
+    pinMode(ePaper_Dc, INPUT);
+    pinMode(ePaper_Rst, INPUT);
+    pinMode(ePaper_Busy, INPUT);
+
+    pinMode(Flash_Cs, INPUT);
+    pinMode(Flash_Miso, INPUT);
+    pinMode(Flash_Mosi, INPUT);
+    pinMode(Flash_Sclk, INPUT);
+
+
 
     digitalWrite(Power_Enable_Pin, LOW);
     pinMode(Power_Enable_Pin, INPUT);
@@ -1030,10 +1135,11 @@ void sleepnRF52840()
 {
     sleepIn = true;
     sleepPeripherals();
+    sd_power_dcdc_mode_set(NRF_POWER_DCDC_DISABLE);
 
     // power down nrf52.
-    sd_power_system_off();       // this function puts the whole nRF52 to deep sleep (no Bluetooth).  If no sense pins are setup (or other hardware interrupts), the nrf52 will not wake up.
-
+    // sd_power_system_off();       // this function puts the whole nRF52 to deep sleep (no Bluetooth).  If no sense pins are setup (or other hardware interrupts), the nrf52 will not wake up.
+    NRF_POWER->SYSTEMOFF = 1;
     // wakeupPeripherals();
 
 }
@@ -1101,6 +1207,34 @@ void loop()
 
 
 
+
+
+void deviceProbe(TwoWire &t)
+{
+    uint8_t err, addr;
+    int nDevices = 0;
+    for (addr = 1; addr < 127; addr++) {
+        t.beginTransmission(addr);
+        err = t.endTransmission();
+        if (err == 0) {
+            Serial.print("I2C device found at address 0x");
+            if (addr < 16)
+                Serial.print("0");
+            Serial.print(addr, HEX);
+            Serial.println(" !");
+            nDevices++;
+        } else if (err == 4) {
+            Serial.print("Unknow error at address 0x");
+            if (addr < 16)
+                Serial.print("0");
+            Serial.println(addr, HEX);
+        }
+    }
+    if (nDevices == 0)
+        Serial.println("No I2C devices found\n");
+    else
+        Serial.println("done\n");
+}
 
 
 
