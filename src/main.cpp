@@ -86,6 +86,7 @@ bool            transmittedFlag = false;
 bool            enableInterrupt = true;
 bool            startListing = true;
 int             transmissionState = 0;
+bool            rtcInterrupt = false;
 
 const uint8_t index_max = 5;
 typedef void (*funcCallBackTypedef)(void);
@@ -522,25 +523,33 @@ void wakeupFlash()
  | | \ \  | | | |____
  |_|  \_\ |_|  \_____|
 ***********************************/
+void rtcInterruptCb()
+{
+    rtcInterrupt = true;
+}
 
 bool setupRTC()
 {
     SerialMon.print("[PCF8563] Initializing ...  ");
+
+    pinMode(RTC_Int_Pin, INPUT);
+    attachInterrupt(RTC_Int_Pin, rtcInterruptCb, FALLING);
+
     Wire.begin();
 
-    int i = 3;
+    int retry = 3;
 
     // deviceProbe(Wire);
 
     int ret = 0;
     do {
 
-        //HYM8563 bug!!
+        //HYM8563 bug!! The first visit may not be able to read correctly
         Wire.beginTransmission(PCF8563_SLAVE_ADDRESS);
         ret = Wire.endTransmission();
         delay(200);
 
-    } while (i--);
+    } while (retry--);
 
     if (ret != 0) {
         SerialMon.println("failed");
@@ -549,6 +558,45 @@ bool setupRTC()
     SerialMon.println("success");
 
     rtc.begin(Wire);
+
+    //*rtc self test*//
+    Serial.println("============rtc self test==============");
+
+    uint16_t year = 2021, mon = 4, day = 13, hour = 12, min = 0, sec = 57;
+    rtc.disableAlarm();
+    rtc.setDateTime(year, mon, day, hour, min, sec);
+    rtc.setAlarmByMinutes(1);
+    rtc.enableAlarm();
+
+    uint32_t seconds = 0;
+    for (;;) {
+
+        if (millis() - last > 1000) {
+            Serial.println(rtc.formatDateTime());
+            last = millis();
+            ++seconds;
+            // When it runs 10 times without jumping out, it is judged as an error
+            if (seconds >= 10) {
+                Serial.println("RTC alarm is unusual !");
+                return false;
+            }
+            Serial.flush();
+        }
+
+
+        if (rtcInterrupt) {
+            rtcInterrupt = false;
+            rtc.resetAlarm();
+            if (year != 2021 || mon != 4 || day != 13 || hour != 12 || min != 0) {
+                Serial.println("RTC datetime is unusual !");
+                return false;
+            }
+            Serial.println("RTC alarm is normal !");
+            break;
+        }
+    }
+    //*rtc self test end*//
+
     return true;
 }
 
